@@ -1,6 +1,6 @@
 use std::{marker::PhantomData};
 
-use rand::RngCore;
+use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use tinyset::SetUsize;
 
@@ -16,16 +16,17 @@ pub struct PortId {
     port: usize
 }
 
-pub struct Ctx<'a, T> {
-    comb: &'a mut T,
-    reg: &'a mut T,
-    first_iter: bool
+pub struct Ctx<'a, T: 'static> {
+    sim: &'a Sim,
+    id: NodeId,
+    phantom: PhantomData<&'a T>
 }
 
 pub trait Node : Copy {
     fn get_port_ids(&self) -> &[PortId];
     fn get_port(&self, port: usize) -> &dyn std::any::Any;
-    fn lsim<'a>(ctx: Ctx<'a, Self>, sim: &Sim) -> bool;
+    fn csim<'a>(&mut self, ctx: &Ctx<'a, Self>) -> bool;
+    fn edge<'a>(&mut self, ctx: &Ctx<'a, Self>);
 }
 
 trait NodeVec {
@@ -34,7 +35,30 @@ trait NodeVec {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
     fn dclone(&self) -> Box<dyn NodeVec>;
     fn get_port(&self, index: usize, port: usize) -> &dyn std::any::Any;
-    fn lsim(&mut self, indices: &SetUsize, ntype: usize, sim: &mut Sim, first_iter: bool) -> SetUsize;
+    fn csim(&mut self, ntype: usize, indices: &SetUsize, sim: &Sim) -> SetUsize;
+    fn edge(&mut self, ntype: usize, sim: &Sim);
+}
+
+impl<'a, T> Ctx<'a, T> {
+    pub fn state(&self) -> &'a T {
+        let vec = self.sim.graph[self.id.ntype]
+            .as_any()
+            .downcast_ref::<Vec<T>>()
+            .unwrap();
+        &vec[self.id.index]
+    }
+
+    pub fn port<P: 'static>(&self, id: PortId) -> Option<&'a P> {
+        self.sim.graph[id.node.ntype]
+            .get_port(id.node.index, id.port)
+            .downcast_ref::<P>()
+    }
+
+    pub fn rng(&self) -> ChaCha8Rng {
+        let seed = (self.id.ntype + self.id.index << 16) as u64;
+        let seed = seed ^ self.sim.rng_state;
+        ChaCha8Rng::seed_from_u64(seed)
+    }
 }
 
 impl<T: 'static + Node> NodeVec for Vec<T> {
@@ -58,18 +82,21 @@ impl<T: 'static + Node> NodeVec for Vec<T> {
         self.get(index).unwrap().get_port(port)
     }
     
-    fn lsim(&mut self, indices: &SetUsize, ntype: usize, sim: &mut Sim, first_iter: bool) -> SetUsize {
-        let reg = sim.graph[ntype].as_any_mut().downcast_mut::<Vec<T>>().unwrap();
+    fn csim(&mut self, ntype: usize, indices: &SetUsize, sim: &Sim) -> SetUsize {
         indices.iter()
-            .map(|i| {
-                let ctx = Ctx { comb: &mut self[i], reg: &mut reg[i], first_iter };
-                if T::lsim(ctx, sim) {
+            .map(|index| {
+                let ctx = Ctx { 
+                    sim,
+                    id: NodeId { ntype, index },
+                    phantom: PhantomData
+                };
+                if self[index].csim(&ctx) {
                     // the node was modified, add it and all connected
                     // nodes to the dirty list
-                    let mut ports = self[i].get_port_ids().iter()
+                    let mut ports = self[index].get_port_ids().iter()
                         .map(|pid| pid.node.index)
                         .collect::<Vec<usize>>();
-                    ports.push(i);
+                    ports.push(index);
                     ports
                 } else {
                     Vec::with_capacity(0)
@@ -77,6 +104,17 @@ impl<T: 'static + Node> NodeVec for Vec<T> {
             })
             .flatten()
             .collect::<SetUsize>()
+    }
+    
+    fn edge(&mut self, ntype: usize, sim: &Sim) {
+        for (index, n) in self.iter_mut().enumerate() {
+            let ctx = Ctx { 
+                sim,
+                id: NodeId { ntype, index },
+                phantom: PhantomData
+            };
+            n.edge(&ctx)
+        }
     }
 }
 
@@ -87,6 +125,16 @@ pub struct Sim {
 }
 
 impl Sim {
+    pub fn new(seed: u64) -> Self {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let rng_state = rng.next_u64();
+        Self {
+            graph: Vec::new(),
+            rng,
+            rng_state
+        }
+    }
+
     pub fn add_node<T: 'static + Node>(&mut self, node: T) -> NodeId {
         for (i, vec) in self.graph.iter_mut().enumerate() {
             if let Some(vec) = vec
@@ -112,18 +160,30 @@ impl Sim {
 
     pub fn sim_cycle(&mut self) {
         self.rng_state = self.rng.next_u64();
+        let mut index_vec: Vec<SetUsize> = (0..self.graph.len())
+            .map(|i| (0..self.graph[i].len()).collect())
+            .collect();
+        while index_vec.iter().any(|s| !s.is_empty()) {
+            let mut cpy = self.graph.iter()
+                .map(|g| g.dclone())
+                .collect::<Vec<Box<dyn NodeVec>>>();
+            for (i, indices) in index_vec.iter_mut()
+                .filter(|s| !s.is_empty())
+                .enumerate() 
+            {
+                *indices = cpy[i].csim(i, &indices, self);
+            }
+            self.graph = cpy;
+        }
+
         let mut cpy = self.graph.iter()
             .map(|g| g.dclone())
             .collect::<Vec<Box<dyn NodeVec>>>();
-
-        // first iteration
         for (i, vec) in cpy
             .iter_mut() 
             .enumerate()
         {
-            let indices: SetUsize = (0..vec.len()).collect();
-            let modified = vec.lsim(&indices, i, self, true);
-            
+            vec.edge(i, self);
         }
     }
 }
