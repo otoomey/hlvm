@@ -67,7 +67,7 @@ impl<T: Clone + 'static + Eq + PartialEq + Default> Node for Fifo<T> {
             } else {
                 false
             }
-        };
+        } else { false };
 
         if let Some(port) = ctx.port::<ReqPort<T>>(self.rsp.port) {
             if port.valid && self.rsp.ready {
