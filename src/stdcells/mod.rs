@@ -8,6 +8,7 @@ pub mod reqrsp;
 pub mod src;
 pub mod sink;
 pub mod fifo;
+pub mod fork;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct NodeId {

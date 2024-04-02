@@ -1,16 +1,16 @@
 use std::{borrow::Cow, fmt::Debug};
 
-use super::{reqrsp::{ReqPort, RspPort}, Node, Port};
+use super::{reqrsp::{ReqPort, RspPort}, Node};
 
 
 #[derive(Clone)]
-pub struct DebugSink<T: Debug + Clone + 'static> {
+pub struct Sink<T: Debug + Clone + 'static> {
     name: String,
-    pub rec: Vec<Option<T>>,
-    pub rsp: RspPort<Option<T>>
+    pub rec: Vec<T>,
+    pub rsp: RspPort<T>
 }
 
-impl<T: Debug + Clone + 'static> DebugSink<T> {
+impl<T: Debug + Clone + 'static> Sink<T> {
     pub fn new(name: String) -> Self {
         Self {
             name,
@@ -20,7 +20,7 @@ impl<T: Debug + Clone + 'static> DebugSink<T> {
     }
 }
 
-impl<T: Debug + Clone + 'static> Node for DebugSink<T> {
+impl<T: Debug + Clone + 'static> Node for Sink<T> {
     fn get_port_ids(&self) -> Cow<[super::Port]> {
         Cow::from(vec![self.rsp.port])
     }
@@ -39,9 +39,9 @@ impl<T: Debug + Clone + 'static> Node for DebugSink<T> {
     }
 
     fn edge<'a>(&mut self, ctx: &super::Ctx<'a, Self>) {
-        if let Some(port) = ctx.port::<ReqPort<Option<T>>>(self.rsp.port) {
+        if let Some(port) = ctx.port::<ReqPort<T>>(self.rsp.port) {
             if port.valid && self.rsp.ready {
-                self.rec.push(port.data.as_ref().map(|x| x.clone()));
+                self.rec.push(port.data.clone());
                 println!("[{}:{}] Received message {:?}.", self.name, ctx.cycle(), port.data);
             }
         }
